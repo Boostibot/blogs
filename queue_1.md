@@ -228,13 +228,13 @@ ids:    |    2    |    1    |    1    |   0..0  |
 
 From this we can intuit the following rules:
 0. head and tail are at max `QUEUE_CAP` appart from each other; tail is at least head
-1. items in range \[head, tail\) contain user initialized data
-2. for ticket in \[head, tail\): ids are equal to `id = (ticket / QUEUE_CAP)*2 + 1` (filled)
-3. for ticket in \[tail, head + QUEUE_CAP\): ids are equal to `id = (ticket / QUEUE_CAP)*2` (not filled)
+1. items in range `[head, tail)` contain user initialized data
+2. for ticket in `[head, tail)`: ids are equal to `id = (ticket / QUEUE_CAP)*2 + 1` (filled)
+3. for ticket in `[tail, head + QUEUE_CAP)`: ids are equal to `id = (ticket / QUEUE_CAP)*2` (not filled)
 
 You can verify that this indeed does hold after all possible sequences of `push` and `pop` operations. This holds even for concurrent executions as long as we look at the queue after *all threads finish*. 
 
-How does it look if some thread does not finish? I will asnwer that with the following example in which I will use a different format:
+How does it look if some thread does not finish? I will asnwer that with the following example in which I will use different notation:
 all thread execution will be written into the same code block but each line is prefixed with the thread which is executing said line. All threads still execute all their lines only their interleaving can be arbitrary. Again the vertical order determines the happens-before relation.
 
 ```C
