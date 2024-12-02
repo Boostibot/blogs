@@ -189,7 +189,7 @@ bool is_closed(Queue* q) {
 }
 ```
 
-Now all operations can also fail when interrupted by a concurrent call to `close`. All good right?  
+Now all operations can also fail when interrupted by a concurrent call to `close`. The `atomic_fetch_sub` of head and tail simply the previously done increment. All good right?  
 
 ## A critical look
 
@@ -199,7 +199,42 @@ Lets answer that first with an illustration of potential concurrent execution re
 all thread execution will be written into the same code block but each line is prefixed with the thread which is executing said line. All threads still execute all their lines only their interleaving can be arbitrary. Again the vertical order determines the happens-before relation.
 
 ```C
+t1: bool pop(Queue* q, Item* item_ptr) {
+t1:     if(atomic_load(&q->closed))
+t1:         return false;
+t1: 
+t1:     uint32_t ticket = atomic_fetch_add(&q->head, 1);
+t1:     uint32_t target = ticket % QUEUE_CAP;
+t1:     uint32_t id = (ticket / QUEUE_CAP)*2 + 1;
+t1: 
+t1:     while(atomic_load(&q->ids[target]) != id) {
+t1:         //thread1 is sheduled out
 
+t2: bool pop(Queue* q, Item* item_ptr) {
+t2:     if(atomic_load(&q->closed))
+t2:         return false;
+t2: 
+t2:     uint32_t ticket = atomic_fetch_add(&q->head, 1);
+t2:     uint32_t target = ticket % QUEUE_CAP;
+t2:     uint32_t id = (ticket / QUEUE_CAP)*2 + 1;
+t2:     //thread2 is sheduled out
+
+t3: push(&q, 1);
+t3: push(&q, 2);
+t3: close(&q);
+
+t1:     //thread1 resumed!
+t1:         if(atomic_load(&q->closed))
+t1:             return false;  //thread1 returns with closed
+
+t2: //thread2 resumed!
+t2: while(atomic_load(&q->ids[target]) != id) {
+t2:     if(atomic_load(&q->closed)) 
+t2:         return false; 
+t2: }
+t2: *item_ptr = q->items[target];
+t2: atomic_store(&q->ids[target], id + 1);
+t2: return true;
 ```
 
 > This is also the answer to the question of why the operation has to be `close` and not something like `cancel`, which would simply unblock all waiting threads without preventing any subsequent operations. The prevention of subsequent operation is not an arbitrary API design decision but an obligatery correctness feature - without it we may pop items that were never inserted, pop a given item twice or similar!
