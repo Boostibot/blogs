@@ -81,6 +81,7 @@ Here is an example concurrent call to first `pop` by thread1 followed by `push` 
 <td>
   
 ```C
+{
 uint32_t ticket = atomic_fetch_add(&q->tail, 1);
 uint32_t target = ticket % QUEUE_CAP;
 uint32_t id = ticket*2;
@@ -93,11 +94,13 @@ while(atomic_load(&q->ids[target]) != id); //waiting...
 //finally!
 q->items[target] = item;
 atomic_store(&q->ids[target], id + 1);
+}
 ```
 </td>
 <td>
 
 ```C
+{
 uint32_t ticket = atomic_fetch_add(&q->head, 1);
 uint32_t target = ticket % QUEUE_CAP;
 uint32_t id = ticket*2 + 1;
@@ -109,7 +112,7 @@ atomic_store(&q->ids[target], id + 2*QUEUE_CAP - 1);
 
 
 
-
+}
 ```
 </td>
 </tr>
