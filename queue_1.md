@@ -1,16 +1,18 @@
-# Fair, blocking concurrent queue (1)
+# Fair, linearizible, blocking concurrent queue (1)
 
 Queues are the basic building block of concurrent comunication. One group of threads/processes/workers are producing data while other group is consuming data, forming a pipeline. This is pattern is happening in every layer of modern computing going down to even the hardware level, for example individual instructions are concurrently decoded, sheduled and executed with queues in between. 
 
-The goal of this series of blogs will be to develop an easy to use concurrent queue primitive roughly equivalent to (buffered) Go channel. This type of queue has push/pop as its main operations, which add/remove item from the queue unless the queue is full/empty in which they block the calling thread untill it becomes not full/empty. Though unlike Go channels we wish to do this without locks. If the queue is not full it should be possible for two threads to push an item with minimal interference. 
-
-After some initial research I have found a quite excellent paper [T. R. W. Scogland - Design and Evaluation of Scalable Concurrent Queues for Many-Core Architectures, 2015](https://synergy.cs.vt.edu/pubs/papers/scogland-queues-icpe15.pdf), which has all the properties we seek. We use this paper as the basis of our design and extend it in some important ways namely allowing full blocking instead of spin waiting, more useful closing behaviour. The remainder of this blog will be devoted to a hopefully intuitive explanation of the Scogland queue (queue from the paper).
+The goal of this series of blogs will be to develop an easy to use concurrent queue primitive roughly equivalent to (buffered) [Go channel](https://go101.org/article/channel.html). This type of queue has push/pop as its main operations, which add/remove item from the queue unless the queue is full/empty in which they block the calling thread untill it becomes not full/empty. Though unlike Go channels we wish to do this without locks. If the queue is not full it should be possible for two threads to push an item with minimal interference. 
 
 > It may appear that having the block-on-full-push (implying there is finite capacity) limitation is too restrictive, dont we wish to grow for as long as we can? Well in practice no. Consider that if the production of new items is just a little faster then the consumption, the queue will eneventually fill up. Without a maximum capacity, it will keep on growing forever untill it exhausts significant portion of our memory, causing some potentially unrelated allocation to fail. This is problematic because it happens so easily - all it takes is a tiny bit slower consumer. A particular workload being slower to consumer? You already have a problem. Because all of this its easier to enforce some concrete upper bound. 
 
+After some initial research I have come across this quite excellent paper [T. R. W. Scogland - Design and Evaluation of Scalable Concurrent Queues for Many-Core Architectures, 2015](https://synergy.cs.vt.edu/pubs/papers/scogland-queues-icpe15.pdf), which has all the properties we seek. We use this paper as the basis of our design and extend it in some important ways namely allowing proper thread blocking instead of spin waiting, more useful closing behaviour. The remainder of this blog will be devoted to a hopefully intuitive explanation of the Scogland queue (queue from the paper).
+
+> What is fair? By fair I mean that a waiting thread cannot be starved of work. That is if thread1 calls pops from an empty queue, followed by thread2 calling pop, then (once the queue becomes nonempty) thread1 will always be allowed to run before thread2. Similar case can be made for push and full queue. This property is essential for allowing the threads to do other work while they are waiting, since the precise timing no longer matters. For example we might have a job system that while waiting starts executing some other job, yet the duration of this job has no effect on the waiting.
+
 ## First try
 
-I assume the reader is more familiar with actual code then some abstract pseudocode so I will just give the full code from the paper. The code is slightly altered to be compilable, use C11/C++ atomics, do just one operation per line (thus be easier to describe). I have also fixed one misstake present in the code listing. 
+I assume the reader is more familiar with actual code then some abstract pseudocode so I will just provide a very basic version of the code from the paper. During the course of this blog we will work our way to something closer to the code in the paper. The code is written using use C11 atomics but turning it into any other language should be trivial.  
 
 ```C
 #define QUEUE_CAP 10 //capacity
@@ -55,13 +57,7 @@ int main() {
 }
 ```
 
-Except few key details, this is the data structure presented in the paper. We will expand it to further down the post. 
-
-So what is this doing? 
-
-To start off this queue uses virtualized head/tail indices - this is to say that head/tail only ever increase and the actual index at which the item resides (`target`) is calculated by doing a modulo with the queue capacity. If `tail > head`, the queue stores precisley `tail - head` items. If `tail == head` the queue is empty. If this is novel to you I invite you to read about this approach [here](https://fgiesen.wordpress.com/2010/12/14/ring-buffers-and-queues/). The reason why it was chosen is obvious - all we need to do to push item is a single atomic add instruction - no complicated ifs.
-
-Okay those are the first two lines of the push and pop operations. What about the rest?
+So what is this doing? To start off this queue uses virtualized head/tail indices - this is to say that head/tail only ever increase and the actual index at which the item resides (`target`) is calculated by doing a modulo with the queue capacity. If `tail > head`, the queue stores precisley `tail - head` items. If `tail == head` the queue is empty. If this is novel to you I invite you to read about this approach [here](https://fgiesen.wordpress.com/2010/12/14/ring-buffers-and-queues/). The reason why it was chosen is obvious - all we need to do to push item is a single atomic add instruction - no complicated ifs.
 
 The queue holds an array `ids`, each of which act like a [ticket lock](https://mfukar.github.io/2017/09/08/ticketspinlock.html). On a push operation the `tail` index is increment which yields `ticket` and as discussed above `target`. We also use `ticket` to calculate `id`. This id uniquelly represents this operation: 
 - the id is always (atomically) increasing so no two pushesh can have the same one (ignoring overflow) 
@@ -69,8 +65,10 @@ The queue holds an array `ids`, each of which act like a [ticket lock](https://m
 
 Now that we have obtained our unique `id` and some `target` we wait for the `ids[target]` to become our `id`. We for now do a simple spin loop whic is like repeatedly asking "Is it my turn? Is it my turn?", while hoepfully some other thread eventually responds, letting us run.
 
-Since the `ids` array gets initialized to, the first push operation will not wait and immediately succeed, moving past the while. Then item is stored and finally 
+Since the `ids` array gets initialized to 0, the first push operation will not wait and immediately succeed, moving past the `while`. Then item is stored and finally 
 the `ids[target]` is incremented. Since `id` is even `id + 1` is odd, allowing only next pop to succeed. This is like saying "I am done here, whicheever pop is after me, its your turn".
+
+> You may have noticed how laxed this blog is about the details: C11 memory model, which atomics to use and what
 
 Here is an example concurrent call to first `pop` by thread1 followed by `push` by thread2 into an empty queue. We illustrate the execution of the two threads by these side by side blocks. The order of events progresses from top to bottom and is shared by the two threads, that is if statement1 of thread1 is above some other statement2 from thread2, then statement1 happened before statement2. If both statement1 and statement2 are on the same line then they happened without any particular ordering.
 
@@ -96,7 +94,6 @@ while(atomic_load(&q->ids[target]) != id); //waiting...
 q->items[target] = item;
 atomic_store(&q->ids[target], id + 1);
 ```
-  
 </td>
 <td>
 
@@ -110,7 +107,6 @@ while(atomic_load(&q->ids[target]) != id);
 *item_ptr = q->items[target];
 atomic_store(&q->ids[target], id + 2*QUEUE_CAP - 1);
 ```
-
 </td>
 </tr>
 </table>
@@ -267,7 +263,10 @@ Why am I saying this? It should be clear that if we just immedietely stop all ex
 
 Okay so we cannot use the queue after it was closed. Whats the big deal? We werent going to do that anyway, right? - Well we really wished to. Going back to the previous example of producer reading a file and consumers waiting to further process the contents, what if the relationship was inverted, the rate of production is greater then consumtption? The producer finishes reading the entire file and calls `close`, letting everyone exit... but also efectively destroying the contents of the queue! After `close` the queue can be in very invalid state, so reading from it can be problematic. 
 
-So what to do about this? One might think that they can simply fix up the queue somehow, restoring it intos *some* functioning state. While that works, its rather costly O(n) operation and further the order of items does not have to be perserved [^2]. I belive in next blog I will introduce a better model for closing, while also implementing proper futex based thread blocking.
+So what to do about this? One might think that they can simply fix up the queue somehow, restoring it intos *some* functioning state. While that works, its rather costly O(n) operation and further the order of items does not have to be perserved, thus also breaking linearizibility. In next blog I will introduce a better model for closing, while also implementing proper futex based thread blocking.
+
+> What is linearizibility? I wont give the fully general definition, since its not very useful. Instead for queues specifically it means that the following needs to hold: 
+After thread1 calls `push(x)` followed by `push(y)`, any other thread2 which pops *both* of these values must also recieve them exactly in the correct order so `x == pop()` follwed by  `y == pop()`. The important bit is the both: there is no particular ordering if thread2 pops x and thread3 pops y. Perhpas more intuitivitely linearizibility just measn the queue perserves some notion of order, which is a property most people would expect.
 
 ```C
 t1: bool pop(Queue* q, Item* item_ptr) {
