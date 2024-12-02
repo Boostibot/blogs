@@ -245,7 +245,8 @@ t1:
 t1:     uint32_t ticket = atomic_fetch_add(&q->tail, 1);
 t1:     uint32_t target = ticket % QUEUE_CAP;
 t1:     uint32_t id = (ticket / QUEUE_CAP)*2;
-t1:     
+t1:     //stopped midway through...     
+t1:
 t2: push(&q, 2); //entire function completes
 ```
 
@@ -275,42 +276,3 @@ So what to do about this? One might think that they can simply fix up the queue 
 
 > What is linearizibility? I wont give the fully general definition, since its not very useful. Instead for queues specifically it means that the following needs to hold: 
 After thread1 calls `push(x)` followed by `push(y)`, any other thread2 which pops *both* of these values must also recieve them exactly in the correct order so `x == pop()` follwed by  `y == pop()`. The important bit is the both: there is no particular ordering if thread2 pops x and thread3 pops y. Perhpas more intuitivitely linearizibility just measn the queue perserves some notion of order, which is a property most people would expect.
-
-```C
-t1: bool pop(Queue* q, Item* item_ptr) {
-t1:     if(atomic_load(&q->closed))
-t1:         return false;
-t1: 
-t1:     uint32_t ticket = atomic_fetch_add(&q->head, 1);
-t1:     uint32_t target = ticket % QUEUE_CAP;
-t1:     uint32_t id = (ticket / QUEUE_CAP)*2 + 1;
-t1: 
-t1:     while(atomic_load(&q->ids[target]) != id) {
-t1:         //thread1 is sheduled out
-
-t2: bool pop(Queue* q, Item* item_ptr) {
-t2:     if(atomic_load(&q->closed))
-t2:         return false;
-t2: 
-t2:     uint32_t ticket = atomic_fetch_add(&q->head, 1);
-t2:     uint32_t target = ticket % QUEUE_CAP;
-t2:     uint32_t id = (ticket / QUEUE_CAP)*2 + 1;
-t2:     //thread2 is sheduled out
-
-t3: push(&q, 1);
-t3: push(&q, 2);
-t3: close(&q);
-
-t1:     //thread1 resumed!
-t1:         if(atomic_load(&q->closed))
-t1:             return false;  //thread1 returns with closed
-
-t2: //thread2 resumed!
-t2: while(atomic_load(&q->ids[target]) != id) {
-t2:     if(atomic_load(&q->closed)) 
-t2:         return false; 
-t2: }
-t2: *item_ptr = q->items[target];
-t2: atomic_store(&q->ids[target], id + 1);
-t2: return true;
-```
