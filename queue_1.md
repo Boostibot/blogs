@@ -70,8 +70,6 @@ Now that we have obtained our unique `id` and some `target` we wait for the `ids
 Since the `ids` array gets initialized to 0, the first push operation will not wait and immediately succeed, moving past the `while`. Then item is stored and finally 
 the `ids[target]` is incremented. Since `id` is even `id + 1` is odd, allowing only next pop to succeed. This is like saying "I am done here, whicheever pop is after me, its your turn".
 
-> You may have noticed how laxed this blog is about the details: C11 memory model, which atomics to use and what
-
 Here is an example concurrent call to first `pop` by thread1 followed by `push` by thread2 into an empty queue. We illustrate the execution of the two threads by these side by side blocks. The order of events progresses from top to bottom and is shared by the two threads, that is if statement1 of thread1 is above some other statement2 from thread2, then statement1 happened before statement2. If both statement1 and statement2 are on the same line then they happened without any particular ordering.
 
 <table>
