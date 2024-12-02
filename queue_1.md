@@ -193,7 +193,7 @@ bool is_closed(Queue* q) {
 }
 ```
 
-Now all operations can also fail when interrupted by a concurrent call to `close`. The `atomic_fetch_sub` of head and tail simply the previously done increment. All good right?  
+Now all operations can also fail when interrupted by a concurrent call to `close`. All good right?  
 
 ## Converged state
 
