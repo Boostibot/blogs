@@ -191,12 +191,83 @@ bool is_closed(Queue* q) {
 
 Now all operations can also fail when interrupted by a concurrent call to `close`. The `atomic_fetch_sub` of head and tail simply the previously done increment. All good right?  
 
-## A critical look
+## Converged state
 
 Up till now the queue appears simple: every access is guarded by a convenient ticket lock. Every operation goes nicely in order ensuring fairness, every operation is guranteed to finish leaving the queue in the correct state... wait! The last is no longer true! What does this mean?
 
-Lets answer that first with an illustration of potential concurrent execution resulting in some problematic cases. Because there are more threads then previous I will use a different format:
+First lets back off a bit and lets try to visualise a normal "converged" state of the queue. We will try to intuit some properties of this state. 
+Look at the queue after performing the following block 
+```C
+Queue q = {0};
+push(&q, 1);
+push(&q, 2);
+push(&q, 3);
+
+Item into;
+pop(&q, &into);
+```
+
+Now the queue in memory will look like the following (please excuse the ascii art):
+```
+U = uninitialized
+
+        +---------+---------+---------+---------+
+values: |    U    |    2    |    3    |   U..U  |
+        +---------+---------+---------+---------+
+
+        +---------+---------+---------+---------+
+ids:    |    2    |    1    |    1    |   0..0  |
+        +---------+---------+---------+---------+
+                  ^                   ^         
+                  head = 1            tail = 3
+```
+
+From this we can intuit the following rules:
+0. head and tail are at max `QUEUE_CAP` appart from each other; tail is at least head
+1. items in range \[head, tail\) contain user initialized data
+2. for ticket in \[head, tail\): ids are equal to `id = (ticket / QUEUE_CAP)*2 + 1` (filled)
+3. for ticket in \[tail, head + QUEUE_CAP\): ids are equal to `id = (ticket / QUEUE_CAP)*2` (not filled)
+
+You can verify that this indeed does hold after all possible sequences of `push` and `pop` operations. This holds even for concurrent executions as long as we look at the queue after *all threads finish*. 
+
+How does it look if some thread does not finish? I will asnwer that with the following example in which I will use a different format:
 all thread execution will be written into the same code block but each line is prefixed with the thread which is executing said line. All threads still execute all their lines only their interleaving can be arbitrary. Again the vertical order determines the happens-before relation.
+
+```C
+t1: push(&q, 1) {
+t1:     if(atomic_load(&q->closed))
+t1:         return false;
+t1: 
+t1:     uint32_t ticket = atomic_fetch_add(&q->tail, 1);
+t1:     uint32_t target = ticket % QUEUE_CAP;
+t1:     uint32_t id = (ticket / QUEUE_CAP)*2;
+t1:     
+t2: push(&q, 2); //entire function completes
+```
+
+The above code block is of course incomplete - thread t1 is nowhere near finishing its function, but alas lets look at hows the queue in memory looking.
+
+```
+U = uninitialized
+
+        +---------+---------+---------+
+values: |    U    |    2    |   U..U  |
+        +---------+---------+---------+
+
+        +---------+---------+---------+
+ids:    |    0    |    1    |   0..0  |
+        +---------+---------+---------+
+        ^                   ^
+        head = 0            tail = 2
+```
+
+The second push has succeeded and has already increment the id at `target = 1` while the first has not yet stored anything leaving its slot zero. This violates just about all of properties of converged state described above. 
+
+Why am I saying this? It should be clear that if we just immedietely stop all execution at an arbtrary point in time with lets say... *ehm* the `close` operation, the resulting queue is not going to be in any sensible state. If allowed to use the queue after it was closed, we would surely run into problems (deadlocks, poping an item twice, overwriting present data). This is also the reason why the operation has to be `close` and not something like `cancel`, which would simply unblock all waiting threads without preventing any subsequent operations. The prevention of subsequent operation is not an arbitrary API design decision but an obligatery correctness feature.
+
+Okay so we cannot use the queue after it was closed. Whats the big deal? We werent going to do that anyway, right? - Well we really wished to. Going back to the previous example of producer reading a file and consumers waiting to further process the contents, what if the relationship was inverted, the rate of production is greater then consumtption? The producer finishes reading the entire file and calls `close`, letting everyone exit... but also efectively destroying the contents of the queue! After `close` the queue can be in very invalid state, so reading from it can be problematic. 
+
+So what to do about this? One might think that they can simply fix up the queue somehow, restoring it intos *some* functioning state. While that works, its rather costly O(n) operation and further the order of items does not have to be perserved [^2]. I belive in next blog I will introduce a better model for closing, while also implementing proper futex based thread blocking.
 
 ```C
 t1: bool pop(Queue* q, Item* item_ptr) {
@@ -236,7 +307,3 @@ t2: *item_ptr = q->items[target];
 t2: atomic_store(&q->ids[target], id + 1);
 t2: return true;
 ```
-
-> This is also the answer to the question of why the operation has to be `close` and not something like `cancel`, which would simply unblock all waiting threads without preventing any subsequent operations. The prevention of subsequent operation is not an arbitrary API design decision but an obligatery correctness feature - without it we may pop items that were never inserted, pop a given item twice or similar!
-
-## Converged state
