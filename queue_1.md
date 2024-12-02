@@ -4,8 +4,7 @@ Queues are the basic building block of concurrent comunication. One group of thr
 
 The goal of this series of blogs will be to develop an easy to use concurrent queue primitive roughly equivalent to (buffered) Go channel. This type of queue has push/pop as its main operations, which add/remove item from the queue unless the queue is full/empty in which they block the calling thread untill it becomes not full/empty. Though unlike Go channels we wish to do this without locks. If the queue is not full it should be possible for two threads to push an item with minimal interference. 
 
-Aside:
-It may appear that having the block-on-full-push (implying there is finite capacity) limitation is too restrictive, dont we wish to grow for as long as we can? Well in practice no. Consider that if the production of new items is just a little faster then the consumption, the queue will eneventually fill up. Without a maximum capacity, it will keep on growing forever untill it exhausts significant portion of our memory, causing some potentially unrelated allocation to fail. This is problematic because it happens so easily - all it takes is a tiny bit slower consumer. A particular workload being slower to consumer? You already have a problem. Because all of this its easier to enforce some concrete upper bound. 
+> It may appear that having the block-on-full-push (implying there is finite capacity) limitation is too restrictive, dont we wish to grow for as long as we can? Well in practice no. Consider that if the production of new items is just a little faster then the consumption, the queue will eneventually fill up. Without a maximum capacity, it will keep on growing forever untill it exhausts significant portion of our memory, causing some potentially unrelated allocation to fail. This is problematic because it happens so easily - all it takes is a tiny bit slower consumer. A particular workload being slower to consumer? You already have a problem. Because all of this its easier to enforce some concrete upper bound. 
 
 After some initial research I have found a quite excellent paper "T. R. W. Scogland - Design and Evaluation of Scalable Concurrent Queues for Many-Core Architectures, 2015" which can be found at https://synergy.cs.vt.edu/pubs/papers/scogland-queues-icpe15.pdf, which has all the properties we seek. We use this paper as the basis of our design and extend it in some important ways namely allowing full blocking instead of spin waiting, more useful closing behaviour. The remainder of this blog will be devoted to a hopefully intuitive explanation of the Scogland queue (queue from the paper).
 
@@ -42,7 +41,7 @@ void pop(Queue *q, Item* item_ptr) {
     while(atomic_load(&q->ids[target]) != id);
 
     *item_ptr = q->items[target];
-    atomic_store(&q->ids[target], id + QUEUE_CAP + 1);
+    atomic_store(&q->ids[target], id + 2*QUEUE_CAP + 1);
 }
 
 int main() {
@@ -104,16 +103,26 @@ uint32_t ticket = atomic_fetch_add(&q->head, 1);
 uint32_t target = ticket % QUEUE_CAP;
 uint32_t id = ticket*2 + 1;
 
-
 while(atomic_load(&q->ids[target]) != id); 
 
 *item_ptr = q->items[target];
-atomic_store(&q->ids[target], id + QUEUE_CAP + 1);
+atomic_store(&q->ids[target], id + 2*QUEUE_CAP - 1);
 ```
 
 </td>
 </tr>
 </table>
+
+Similar execution will happen if thread1 pushes to a full queue, then thread2 pops first item. The pop will obtain `ticket = 0, target = 0, id = 1` succeed without waiting and finally set 
+`ids[0] = id + 2*QUEUE_CAP - 1 == 2*QUEUE_CAP` which is precisely the id of push by thread1.  
+
+> Of course in real implementation `QUEUE_CAP` will be a field of `Queue` which changes dynamically. Because of that, if you are like me, you might immediately get the urge to enforce `QUEUE_CAP` be power of two, thus allowing one to replace the dvision/remainder operations by `QUEUE_CAP` with bithshifts or mask operations. While this will of course improve the total running time of the critical section, the limitation to power of two capacity is perhaps too severe. Looking at Go these concurrent queues (channles) are often times *not* used to share data between threads but only to allow thread synchronization: thread1 pops and is blocked because queue is empty until some thread2 come along and pushes some dummy item. For this to work the the queue needs to be precisely some specific number. Using power of two greater than that will result in incorrect synchronization. 
+
+In these posts I will be largely ignoring issues related to potential overflow. These issues are quite easy to solve and would just obfuscate the simplicity of the underlying ideas. Still however I will allow myself one optimalization which will drastically lower the probability of overflows of the each id in the ids array.
+
+You might notice an inefficiency of the way we are assigning `id`: lets say a concurrent push and pop happened and one obtained ticket1 and the other ticket2. Unless ticket1 and ticket2 are some multiple of `QUEUE_CAP` appart from each othery, they will not share the same `target` and thus there is no reason for id1 to be disctinct from id2. Simply put there will never be a case where thread1 is waiting for thread2 to complete if their tickets are not multiple of `QUEUE_CAP` from each other. This means we can for pushes calculate id as `id = (ticket / QUEUE_CAP)*2` while for pops as ``id = (ticket / QUEUE_CAP)*2 + 1`. This also allows us to change the increment after push/pop to just `atomic_store(&q->ids[target], id + 1)` for both.
+
+
 
 
 
