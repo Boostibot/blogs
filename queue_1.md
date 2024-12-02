@@ -10,7 +10,7 @@ After some initial research I have come across this quite excellent paper [T. R.
 
 > What is fair? By fair I mean that a waiting thread cannot be starved of work. That is if thread1 calls pops from an empty queue, followed by thread2 calling pop, then (once the queue becomes nonempty) thread1 will always be allowed to run before thread2. Similar case can be made for push and full queue. This property is essential for allowing the threads to do other work while they are waiting, since the precise timing no longer matters. For example we might have a job system that while waiting starts executing some other job, yet the duration of this job has no effect on the waiting.
 
-> The final implementation of this entire series of blogs can be found [here](https://github.com/Boostibot/c_lib/blob/main/channel.h).
+> The final implementation which will be reached after the entire series of blogs can be found [here](https://github.com/Boostibot/c_lib/blob/main/channel.h).
 
 ## First try
 
