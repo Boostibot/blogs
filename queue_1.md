@@ -47,7 +47,7 @@ void pop(Queue* q, Item* item_ptr) {
     while(atomic_load(&q->ids[target]) != id);
 
     *item_ptr = q->items[target];
-    atomic_store(&q->ids[target], id + 2*QUEUE_CAP + 1);
+    atomic_store(&q->ids[target], id + 2*QUEUE_CAP - 1);
 }
 
 int main() {
