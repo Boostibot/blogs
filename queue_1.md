@@ -197,10 +197,10 @@ Now all operations can also fail when interrupted by a concurrent call to `close
 
 ## Converged state
 
-Up till now the queue appears simple: every access is guarded by a convenient ticket lock. Every operation goes nicely in order ensuring fairness, every operation is guranteed to finish leaving the queue in the correct state... wait! The last is no longer true! What does this mean?
+Up till now the queue appears simple: every access is guarded by a convenient ticket lock. Every operation goes nicely in order ensuring fairness, every operation is guranteed to finish leaving the queue in the correct state... but what does correct state mean how does it relate to closing?
 
-First lets back off a bit and lets try to visualise a normal "converged" state of the queue. We will try to intuit some properties of this state. 
-Look at the queue after performing the following block 
+First lets back off a bit and lets try to visualise a normal, correct, "converged" state of the queue. We will try to intuit some properties of this state. 
+Look at the queue after performing the following operations 
 ```C
 Queue q = {0};
 push(&q, 1);
@@ -232,10 +232,10 @@ From this we can intuit the following rules:
 2. for ticket in `[head, tail)`: ids are equal to `id = (ticket / QUEUE_CAP)*2 + 1` (filled)
 3. for ticket in `[tail, head + QUEUE_CAP)`: ids are equal to `id = (ticket / QUEUE_CAP)*2` (not filled)
 
-You can verify that this indeed does hold after all possible sequences of `push` and `pop` operations. This holds even for concurrent executions as long as we look at the queue after *all threads finish*. 
+You can verify that this indeed does hold after all possible sequences of `push` and `pop` operations. It holds even for concurrent executions as long as we look at the queue after *all threads finish*. 
 
-How does it look if some thread does not finish? I will asnwer that with the following example in which I will use different notation:
-all thread execution will be written into the same code block but each line is prefixed with the thread which is executing said line. All threads still execute all their lines only their interleaving can be arbitrary. Again the vertical order determines the happens-before relation.
+How does it look if some thread does not finish? Consider the following example in which I will use different notation:
+all thread execution will be written into the same code block but each line is prefixed with the thread which is executing said line. The thread interleaving can be arbitrary. Again the vertical order determines the happens-before relation.
 
 ```C
 t1: push(&q, 1) {
@@ -250,7 +250,7 @@ t1:
 t2: push(&q, 2); //entire function completes
 ```
 
-The above code block is of course incomplete - thread t1 is nowhere near finishing its function, but alas lets look at hows the queue in memory looking.
+The above code block is of course incomplete - thread t1 is nowhere near finishing its function, but alas lets look at how does the queue look in memory.
 
 ```
 U = uninitialized
@@ -270,9 +270,9 @@ The second push has succeeded and has already increment the id at `target = 1` w
 
 Why am I saying this? It should be clear that if we just immedietely stop all execution at an arbtrary point in time with lets say... *ehm* the `close` operation, the resulting queue is not going to be in any sensible state. If allowed to use the queue after it was closed, we would surely run into problems (deadlocks, poping an item twice, overwriting present data). This is also the reason why the operation has to be `close` and not something like `cancel`, which would simply unblock all waiting threads without preventing any subsequent operations. The prevention of subsequent operation is not an arbitrary API design decision but an obligatery correctness feature.
 
-Okay so we cannot use the queue after it was closed. Whats the big deal? We werent going to do that anyway, right? - Well we really wished to. Going back to the previous example of producer reading a file and consumers waiting to further process the contents, what if the relationship was inverted, the rate of production is greater then consumtption? The producer finishes reading the entire file and calls `close`, letting everyone exit... but also efectively destroying the contents of the queue! After `close` the queue can be in very invalid state, so reading from it can be problematic. 
+Okay so we cannot use the queue after it was closed. Whats the big deal? We werent going to do that anyway, right? Well we would wish to. Consider the previous example of producer reading a file and consumers waiting to further process the contents. What if the relationship was inverted, the rate of production is greater then consumtption? The producer finishes reading the entire file and calls `close`, letting everyone exit. There is nobody waiting in a pop operation, instead the only effect of close is destroying the contents of the queue! After `close` the queue can be in very invalid state, so reading from it can be problematic. 
 
-So what to do about this? One might think that they can simply fix up the queue somehow, restoring it intos *some* functioning state. While that works, its rather costly O(n) operation and further the order of items does not have to be perserved, thus also breaking linearizibility. In next blog I will introduce a better model for closing, while also implementing proper futex based thread blocking.
+So what to do about this? One might think that they can simply fix up the queue somehow, restoring it into *some* functioning state. While that works, its rather costly O(n) operation, further the order of items does not have to be perserved, thus also breaking linearizibility. In next blog I will introduce a better model for closing, while also implementing proper futex based thread blocking.
 
 > What is linearizibility? I wont give the fully general definition, since its not very useful. Instead for queues specifically it means that the following needs to hold: 
 After thread1 calls `push(x)` followed by `push(y)`, any other thread2 which pops *both* of these values must also recieve them exactly in the correct order so `x == pop()` follwed by  `y == pop()`. The important bit is the both: there is no particular ordering if thread2 pops x and thread3 pops y. Perhpas more intuitivitely linearizibility just measn the queue perserves some notion of order, which is a property most people would expect.
