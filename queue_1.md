@@ -29,9 +29,9 @@ typedef struct Queue {
 } Queue;
 
 void push(Queue* q, Item item) {
-    uint32_t ticket = atomic_fetch_add(&q->tail, 1);
-    uint32_t target = ticket % QUEUE_CAP;
-    uint32_t id = ticket*2;
+    uint64_t ticket = atomic_fetch_add(&q->tail, 1);
+    uint64_t target = ticket % QUEUE_CAP;
+    uint64_t id = ticket*2;
 
     while(atomic_load(&q->ids[target]) != id);
 
@@ -40,19 +40,26 @@ void push(Queue* q, Item item) {
 }
 
 void pop(Queue* q, Item* item_ptr) {
-    uint32_t ticket = atomic_fetch_add(&q->head, 1);
-    uint32_t target = ticket % QUEUE_CAP;
-    uint32_t id = ticket*2 + 1;
+    uint64_t ticket = atomic_fetch_add(&q->head, 1);
+    uint64_t target = ticket % QUEUE_CAP;
+    uint64_t id = ticket*2 + 1;
 
     while(atomic_load(&q->ids[target]) != id);
 
     *item_ptr = q->items[target];
-    atomic_store(&q->ids[target], id + 2*QUEUE_CAP - 1);
+    atomic_store(&q->ids[target], id - 1 + 2*QUEUE_CAP);
+}
+
+void init(Queue* queue) {
+    memset(queue, 0, sizeof(Queue));
+    //initialize all ids such that fiest push will succeed
+    for(uint32_t i = 0; i < QUEUE_CAP; i++)
+        queue->ids[i] = i*2;
 }
 
 int main() {
-    //initialize everything to zero
     Queue q = {0};
+    init(&q);
     push(&q, 1);
     push(&q, 2);
     push(&q, 3);
@@ -68,63 +75,39 @@ The queue holds an array `ids`, each of which act like a [ticket lock](https://m
 Now that we have obtained our unique `id` and some `target` we wait for the `ids[target]` to become our `id`. We for now do a simple spin loop whic is like repeatedly asking "Is it my turn? Is it my turn?", while hoepfully some other thread eventually responds, letting us run.
 
 Since the `ids` array gets initialized to 0, the first push operation will not wait and immediately succeed, moving past the `while`. Then item is stored and finally 
-the `ids[target]` is incremented. Since `id` is even `id + 1` is odd, allowing only next pop to succeed. This is like saying "I am done here, whicheever pop is after me, its your turn".
+the `ids[target]` is incremented. Since `id` is even `id + 1` is odd, allowing only next pop to succeed. This is like saying "I am done here, whicheever pop is after me, its your turn". On the other hand pop sets up `ids[target]` to be even (`id - 1`) and to match the ticket of the next push that writes into this slot (`+ 2*QUEUE_CAP`).
 
-Here is an example concurrent call to first `pop` by thread1 followed by `push` by thread2 into an empty queue. We illustrate the execution of the two threads by these side by side blocks. The order of events progresses from top to bottom and is shared by the two threads, that is if statement1 of thread1 is above some other statement2 from thread2, then statement1 happened before statement2. If both statement1 and statement2 are on the same line then they happened without any particular ordering.
-
-<table>
-<tr>
-<th>thread1 (pop)</th>
-<th>thread2 (push)</th>
-</tr>
-<tr>
-<td>
-  
-```C
-pop(&q, &item) {
-    uint32_t ticket = atomic_fetch_add(&q->tail, 1);
-    uint32_t target = ticket % QUEUE_CAP;
-    uint32_t id = ticket*2;
-
-    while(atomic_load(&q->ids[target]) != id); //waiting... 
-
-
-
-
-    //finally!
-    q->items[target] = item;
-    atomic_store(&q->ids[target], id + 1);
-}
-```
-</td>
-<td>
+Here is an example concurrent call to first `pop` by thread1 followed by `push` by thread2 into an empty queue. 
+I am illustrating the execution of the two threads in a single code block using the following notation: each line is prefixed with shorthand name of the thread executing said line (`t1`/`t2` is shorthand for thread1/thread2). The order of events progresses from top to bottom and is shared by the two threads, that is if statement1 of thread1 is above some other statement2 from thread2, then statement1 happened before statement2. 
 
 ```C
-push(&q, 1) {
-
-    uint32_t ticket = atomic_fetch_add(&q->head, 1);
-    uint32_t target = ticket % QUEUE_CAP;
-    uint32_t id = ticket*2 + 1;
-
-    while(atomic_load(&q->ids[target]) != id); 
-
-    *item_ptr = q->items[target];
-    atomic_store(&q->ids[target], id + 2*QUEUE_CAP - 1);
-
-
-
-}
+t1: pop(q, &item) {
+t1:     uint64_t ticket = atomic_fetch_add(&q->head, 1);
+t1:     uint64_t target = ticket % QUEUE_CAP;
+t1:     uint64_t id = ticket*2 + 1;
+t1: 
+t1:     while(atomic_load(&q->ids[target]) != id); //waiting
+t1: 
+t2: push(q, 1) {
+t2:     uint64_t ticket = atomic_fetch_add(&q->tail, 1);
+t2:     uint64_t target = ticket % QUEUE_CAP;
+t2:     uint64_t id = ticket*2;
+t2: 
+t2:     while(atomic_load(&q->ids[target]) != id);
+t2: 
+t2:     q->items[target] = item;
+t2:     atomic_store(&q->ids[target], id + 1);
+t2: }
+t1:     *item_ptr = q->items[target];
+t1:     atomic_store(&q->ids[target], id - 1 + 2*QUEUE_CAP);
+t1: }
 ```
-</td>
-</tr>
-</table>
-
 Similar execution will happen if thread1 pushes to a full queue, then thread2 pops first item. The pop will obtain `ticket = 0, target = 0, id = 1` succeed without waiting and finally set 
 `ids[0] = id + 2*QUEUE_CAP - 1 == 2*QUEUE_CAP` which is precisely the id of push by thread1.  
 
 In these posts I will be largely ignoring issues related to potential overflow. These issues are quite easy to solve and would just obfuscate the simplicity of the underlying ideas. Still however I will allow myself one optimalization which will drastically lower the probability of overflows of the each id in the ids array.
 
-You might notice an inefficiency of the way we are assigning `id`: lets say a concurrent push and pop happened and one obtained ticket1 and the other ticket2. Unless ticket1 and ticket2 are some multiple of `QUEUE_CAP` appart from each othery, they will not share the same `target` and thus there is no reason for id1 to be disctinct from id2. Simply put there will never be a case where thread1 is waiting for thread2 to complete if their tickets are not multiple of `QUEUE_CAP` from each other. This means we can for pushes calculate id as `id = (ticket / QUEUE_CAP)*2` while for pops as `id = (ticket / QUEUE_CAP)*2 + 1`. This also allows us to change the increment after push/pop to just `atomic_store(&q->ids[target], id + 1)` for both.
+You might notice an inefficiency of the way we are assigning `id`: lets say a concurrent push and pop happened and one obtained ticket1 and the other ticket2. Unless ticket1 and ticket2 are some multiple of `QUEUE_CAP` appart from each othery, they will not share the same `target` and thus there is no reason for id1 to be disctinct from id2. Simply put there will never be a case where thread1 is waiting for thread2 to complete if their tickets are not multiple of `QUEUE_CAP` from each other. This means we can for pushes calculate id as `id = (ticket / QUEUE_CAP)*2` while for pops as `id = (ticket / QUEUE_CAP)*2 + 1`. This also allows us to change the increment after push/pop to just `atomic_store(&q->ids[target], id + 1)` for both and shorthen the `init` function to just `memset` everything to zero.
 
 > Of course in real implementation `QUEUE_CAP` will be a field of `Queue` which changes dynamically. If you are like me, you might immediately get the urge to enforce `QUEUE_CAP` to be power of two, thus allowing one to replace the dvision or remainder operations with bithshifts or mask operations. While this will of course improve the total running time of the critical section, the limitation to power of two capacity is perhaps too severe. Looking at Go these concurrent queues (channels) are often times *not* used to share data between threads but only to allow thread synchronization: thread1 pops and is blocked because queue is empty until some thread2 come along and pushes some dummy item. For this to work the the queue needs to be precisely some specific number. Using power of two greater than that will result in incorrect synchronization. 
 
@@ -153,7 +136,7 @@ bool push(Queue* q, Item item) {
     if(atomic_load(&q->closed))
         return false;
 
-    uint32_t ticket = atomic_fetch_add(&q->tail, 1);
+    uint64_t ticket = atomic_fetch_add(&q->tail, 1);
     uint32_t target = ticket % QUEUE_CAP;
     uint32_t id = (ticket / QUEUE_CAP)*2;
 
@@ -171,7 +154,7 @@ bool pop(Queue* q, Item* item_ptr) {
     if(atomic_load(&q->closed))
         return false;
 
-    uint32_t ticket = atomic_fetch_add(&q->head, 1);
+    uint64_t ticket = atomic_fetch_add(&q->head, 1);
     uint32_t target = ticket % QUEUE_CAP;
     uint32_t id = (ticket / QUEUE_CAP)*2 + 1;
 
@@ -190,6 +173,9 @@ void close(Queue* q) {
 }
 bool is_closed(Queue* q) {
     return atomic_load(&q->closed);
+}
+void init(Queue* queue) {
+    memset(queue, 0, sizeof(Queue));
 }
 ```
 
@@ -234,8 +220,7 @@ From this we can intuit the following rules:
 
 You can verify that this indeed does hold after all possible sequences of `push` and `pop` operations. It holds even for concurrent executions as long as we look at the queue after *all threads finish*. 
 
-How does it look if some thread does not finish? Consider the following example in which I will use different notation:
-all thread execution will be written into the same code block but each line is prefixed with the thread which is executing said line. The thread interleaving can be arbitrary. Again the vertical order determines the happens-before relation.
+How does it look if some thread does not finish? 
 
 ```C
 t1: push(&q, 1) {
@@ -268,7 +253,7 @@ ids:    |    0    |    1    |   0..0  |
 
 The second push has succeeded and has already increment the id at `target = 1` while the first has not yet stored anything leaving its slot zero. This violates just about all of properties of converged state described above. 
 
-Why am I saying this? It should be clear that if we just immedietely stop all execution at an arbtrary point in time with lets say... *ehm* the `close` operation, the resulting queue is not going to be in any sensible state. If allowed to use the queue after it was closed, we would surely run into problems (deadlocks, poping an item twice, overwriting present data). This is also the reason why the operation has to be `close` and not something like `cancel`, which would simply unblock all waiting threads without preventing any subsequent operations. The prevention of subsequent operation is not an arbitrary API design decision but an obligatery correctness feature.
+Why am I saying this? It should be clear that if we just immedietely stop all execution at an arbtrary point in time with lets say... *ehm* the `close` operation, the resulting queue is not going to be in any sensible state. Normally this strange state would eventually, after all threads exit, converge again, however close forces threads to exit immediately, preventing that from happening. Whats worse, if we were allowed to use the queue after it was closed, we would surely run into problems (deadlocks, poping an item twice, overwriting present data). For example, looking at the above diagram, if we were to call pop we would get into deadlock since the `target = 0` is not filled. Similarly all future pushes into `target = 0` will also fail, since by the time push wraps back to `target = 0` our `id` of the push operation will no longer be `0`. This is also the reason why the operation has to be `close` and not something like `cancel`, which would simply unblock all waiting threads without preventing any subsequent operations. The prevention of subsequent operation is not an arbitrary API design decision but an obligatery correctness feature.
 
 Okay so we cannot use the queue after it was closed. Whats the big deal? We werent going to do that anyway, right? Well we would wish to. Consider the previous example of producer reading a file and consumers waiting to further process the contents. What if the relationship was inverted, the rate of production is greater then consumtption? The producer finishes reading the entire file and calls `close`, letting everyone exit. There is nobody waiting in a pop operation, instead the only effect of close is destroying the contents of the queue! After `close` the queue can be in very invalid state, so reading from it can be problematic. 
 
